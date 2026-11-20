@@ -8376,7 +8376,12 @@ radv_init_default_state(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   cmd_buffer->state.cond_render.type = -1;
+   /* Preserve an active predicate across vkCmdExecuteCommands. The feature
+    * inheritedConditionalRendering requires that state to survive. Begin
+    * still starts disabled because reset zeroes enabled first.
+    */
+   if (!cmd_buffer->state.cond_render.enabled)
+      cmd_buffer->state.cond_render.type = -1;
 
    if (cmd_buffer->qf == RADV_QUEUE_GENERAL) {
       vk_dynamic_graphics_state_init(&cmd_buffer->state.dynamic.vk);
@@ -8453,6 +8458,42 @@ radv_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBegi
    }
 
    if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
+      const VkCommandBufferInheritanceConditionalRenderingInfoEXT *cond_inherit = vk_find_struct_const(
+         pBeginInfo->pInheritanceInfo->pNext, COMMAND_BUFFER_INHERITANCE_CONDITIONAL_RENDERING_INFO_EXT);
+
+      /* Record draws and dispatches as predicated. The predicate value is not
+       * known yet: the primary writes a normalized 64-bit value into this slot
+       * in vkCmdExecuteCommands (0 = discard). GFX8 SET_PREDICATION is 64-bit,
+       * so the high dword stays 0. Inversion is folded into the value.
+       */
+      if (cond_inherit && cond_inherit->conditionalRenderingEnable &&
+          (cmd_buffer->qf == RADV_QUEUE_GENERAL || cmd_buffer->qf == RADV_QUEUE_COMPUTE)) {
+         uint64_t slot_va = 0;
+
+         if (!radv_cmd_buffer_vram_suballoc(cmd_buffer, 8, 8, &slot_va)) {
+            vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         }
+
+         struct radeon_winsys_bo *slot_bo = NULL;
+         for (unsigned i = 0; i < RADV_NUM_LINEAR_SUBALLOCATORS; i++) {
+            struct radv_linear_suballoc_buffer *sub = &cmd_buffer->linear_suballocators[i];
+            if (sub->bo && slot_va >= sub->bo->va && slot_va < sub->bo->va + sub->size) {
+               slot_bo = sub->bo;
+               break;
+            }
+         }
+
+         struct radv_cond_render_state *cond = &cmd_buffer->state.cond_render;
+         cond->inherited = true;
+         cond->inherited_bo = slot_bo;
+         cond->enabled = true;
+         cond->type = 1; /* draw when the slot is non-zero */
+         cond->op = pdev->info.has_32bit_predication ? PREDICATION_OP_BOOL32 : PREDICATION_OP_BOOL64;
+         cond->user_va = slot_va;
+         cond->emulated_va = slot_va;
+      }
+
       const VkCommandBufferInheritanceDescriptorHeapInfoEXT *heap_info =
          vk_find_struct_const(pBeginInfo->pInheritanceInfo->pNext, COMMAND_BUFFER_INHERITANCE_DESCRIPTOR_HEAP_INFO_EXT);
       if (heap_info) {
@@ -10586,6 +10627,11 @@ radv_invalidate_state(struct radv_cmd_buffer *cmd_buffer)
    bool cp_dma_realignment_busy = cmd_buffer->state.cp_dma_realignment_is_busy;
    uint32_t perfect_occlusion_queries_enabled_save = cmd_buffer->state.perfect_occlusion_queries_enabled;
    bool uses_draw_indirect = cmd_buffer->state.uses_draw_indirect;
+   /* inheritedConditionalRendering: conditional rendering stays active in the
+    * primary after vkCmdExecuteCommands. GPU SET_PREDICATION is left alone;
+    * keeping the CPU-side state makes later draws set the predicate bit.
+    */
+   struct radv_cond_render_state cond_render_save = cmd_buffer->state.cond_render;
 
    /* From the Vulkan spec 1.4.349:
     *
@@ -10598,6 +10644,7 @@ radv_invalidate_state(struct radv_cmd_buffer *cmd_buffer)
     */
    memset(&cmd_buffer->state, 0, sizeof(cmd_buffer->state));
 
+   cmd_buffer->state.cond_render = cond_render_save;
    cmd_buffer->state.render = render_save;
    cmd_buffer->state.active_pipeline_queries = active_pipeline_queries_save;
    cmd_buffer->state.active_emulated_pipeline_queries = active_emulated_pipeline_queries_save;
@@ -10614,6 +10661,55 @@ radv_invalidate_state(struct radv_cmd_buffer *cmd_buffer)
 
    /* Reset all tracked registers after executing a secondary because it's safer. */
    ac_init_tracked_regs(&cmd_buffer->cs->tracked_regs, &pdev->info, false);
+}
+
+static void radv_emit_copy_data_imm(const struct radv_physical_device *pdev, struct radv_cmd_stream *cs, uint32_t src_imm,
+                                    uint64_t dst_va);
+
+/* Copy the primary predicate into the secondary's slot before its packets run.
+ * Graphics draws also honor the SET_PREDICATION the primary already emitted;
+ * this slot is what compute COND_EXEC and meta's predication restore read,
+ * because those packets baked an address at secondary record time.
+ */
+static void
+radv_prepare_inherited_conditional_rendering(struct radv_cmd_buffer *primary, struct radv_cmd_buffer *secondary)
+{
+   struct radv_device *device = radv_cmd_buffer_device(primary);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   struct radv_cmd_stream *cs = primary->cs;
+   const struct radv_cond_render_state *src = &primary->state.cond_render;
+   const struct radv_cond_render_state *dst = &secondary->state.cond_render;
+
+   if (!dst->inherited || !dst->user_va || !dst->inherited_bo)
+      return;
+
+   radv_cs_add_buffer(device->ws, cs->b, dst->inherited_bo);
+   radeon_check_space(device->ws, cs->b, 32);
+
+   /* Unpredicated on purpose: the fill has to happen even when the primary
+    * predicate is false, so the secondary's own predicated packets see it.
+    * Normalized result: 0 discards, any other value draws. Inversion of the
+    * primary is folded into that value (type == 0 means inverted).
+    */
+   if (!src->enabled || !src->user_va) {
+      radv_emit_copy_data_imm(pdev, cs, 1, dst->user_va);
+      radv_emit_copy_data_imm(pdev, cs, 0, dst->user_va + 4);
+      return;
+   }
+
+   if (src->type) {
+      radv_emit_copy_data_imm(pdev, cs, 0, dst->user_va + 4);
+      ac_emit_cp_copy_data(cs->b, COPY_DATA_SRC_MEM, COPY_DATA_DST_MEM, src->user_va, dst->user_va,
+                           AC_CP_COPY_DATA_WR_CONFIRM, false);
+   } else {
+      radv_emit_copy_data_imm(pdev, cs, 1, dst->user_va);
+      radv_emit_copy_data_imm(pdev, cs, 0, dst->user_va + 4);
+      /* COND_EXEC skips the following packet when the 32-bit value is 0.
+       * COPY_DATA is 6 dwords, so a zero predicate leaves the slot at 1.
+       */
+      ac_emit_cp_cond_exec(cs->b, pdev->info.gfx_level, src->user_va, 6, false);
+      radv_emit_copy_data_imm(pdev, cs, 0, dst->user_va);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -10641,6 +10737,8 @@ radv_CmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCou
 
    for (uint32_t i = 0; i < commandBufferCount; i++) {
       VK_FROM_HANDLE(radv_cmd_buffer, secondary, pCmdBuffers[i]);
+
+      radv_prepare_inherited_conditional_rendering(primary, secondary);
 
       /* Do not launch an IB2 for secondary command buffers that contain
        * DRAW_{INDEX}_INDIRECT_{MULTI} on GFX6-7 because it's illegal and hangs the GPU.
@@ -16473,6 +16571,7 @@ radv_init_color_image_metadata(struct radv_cmd_buffer *cmd_buffer, struct radv_i
                                const VkImageSubresourceRange *range)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
    bool need_dcc_init = false, need_metadata_init = false, need_dcc_metadata_init = false;
    uint32_t dcc_init_value = 0;
    uint32_t flush_bits = 0;
@@ -16500,7 +16599,13 @@ radv_init_color_image_metadata(struct radv_cmd_buffer *cmd_buffer, struct radv_i
       dcc_init_value = DCC_UNCOMPRESSED; /* Fully expanded mode. */
 
       if (radv_layout_dcc_compressed(device, image, range->baseMipLevel, dst_layout, dst_queue_mask)) {
-         dcc_init_value = DCC_CLEAR_0000;
+         /* Polaris medium RTs keep DCC but never fast-clear. CLEAR_0000 would
+          * require a fast-clear eliminate before the VI sampler can read the
+          * surface, so leave those tiles expanded. CB still delta-compresses
+          * pixels it writes. Every other compressed layout keeps the clear code.
+          */
+         if (!radv_polaris_dcc_without_fast_clear(pdev, image))
+            dcc_init_value = DCC_CLEAR_0000;
       }
 
       need_dcc_init = true;

@@ -111,11 +111,17 @@ radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   /* Check if the GPU has SDMA support and transfer queues are allowed. The queue
-    * is exposed when the experimental flag is set or when a per-application drirc
-    * profile opts in (radv_enable_transfer_queue). */
+   /* Check if the GPU has SDMA support and transfer queues are allowed.
+    *
+    * The RX 580 (Polaris 10, SDMA 3.x) exposes the queue by default. SDMA there
+    * cannot read DCC/HTILE; radv_sdma_supports_image rejects those copies and
+    * the compute gang performs them instead, so async buffer copies and
+    * uncompressed image copies do not disable compression. Other GPUs still
+    * require RADV_PERFTEST=transfer_queue or radv_enable_transfer_queue.
+    */
+   const bool polaris_sdma = pdev->info.family == CHIP_POLARIS10;
    if (pdev->info.sdma_ip_version == SDMA_UNKNOWN || !pdev->info.ip[AMD_IP_SDMA].num_queues ||
-       (!(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE) &&
+       (!polaris_sdma && !(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE) &&
         !pdev->drirc.performance.enable_transfer_queue))
       return false;
 
@@ -215,11 +221,20 @@ radv_bfloat16_enabled(const struct radv_physical_device *pdev)
 static bool
 radv_shader_fp16_enabled(const struct radv_physical_device *pdev)
 {
-   /* GFX8 supports fp16, but not double rate packed math.  We don't enable
-    * that by default because it can sometimes hurt perf.
+   /* GFX9+ has packed fp16 ALU (double-rate v_pk_*). */
+   if (pdev->info.compiler_info.has_packed_math_16bit)
+      return true;
+
+   /* The RX 580 (Polaris 10) has f16 conversions and unpacked D16 loads, but
+    * not v_add_f16 or packed fp16 ALU. shaderFloat16 is advertised only on
+    * that chip: radv_postprocess_nir lowers unsupported fp16 ALU to fp32 and
+    * keeps the conversions. radv_enable_float16_gfx8 remains an explicit
+    * opt-in for any other GFX8.
     */
-   return pdev->info.compiler_info.has_packed_math_16bit ||
-          (pdev->info.gfx_level == GFX8 && pdev->drirc.features.enable_float16_gfx8);
+   if (pdev->info.gfx_level != GFX8)
+      return false;
+
+   return pdev->info.family == CHIP_POLARIS10 || pdev->drirc.features.enable_float16_gfx8;
 }
 
 bool
@@ -1175,7 +1190,10 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_EXT_conditional_rendering */
       .conditionalRendering = true,
-      .inheritedConditionalRendering = false,
+      /* Software, RX 580 only: secondaries record predicated packets and the
+       * primary copies its predicate into the secondary's slot at execute time.
+       */
+      .inheritedConditionalRendering = pdev->info.family == CHIP_POLARIS10,
 
       /* VK_KHR_vertex_attribute_divisor */
       .vertexAttributeInstanceRateDivisor = true,

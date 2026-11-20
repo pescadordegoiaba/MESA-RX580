@@ -101,9 +101,15 @@ radv_use_tc_compat_htile_for_image(struct radv_device *device, const struct radv
          return false;
 
       /* TC-compat HTILE for layered images can have interleaved slices (see sliceInterleaved flag
-       * in addrlib).  radv_clear_htile does not work.
+       * in addrlib).  radv_clear_htile addresses one layer as a contiguous meta slice, which is
+       * wrong when slices are interleaved.
+       *
+       * On the RX 580 (Polaris 10), shadow-map arrays are the common case. Ask for
+       * TC-compat here and drop it after surface init when the slice size is not
+       * pipe-aligned (see radv_image_create_layout). Other GFX8 chips keep the
+       * blanket rejection.
        */
-      if (image->vk.array_layers > 1)
+      if (image->vk.array_layers > 1 && pdev->info.family != CHIP_POLARIS10)
          return false;
    }
 
@@ -129,6 +135,28 @@ radv_surface_has_scanout(struct radv_device *device, const struct radv_image_cre
    }
 
    return info->scanout;
+}
+
+bool
+radv_polaris_dcc_without_fast_clear(const struct radv_physical_device *pdev, const struct radv_image *image)
+{
+   /* RX 580 (Polaris 10) is bandwidth-bound. DCC on a medium color target still
+    * cuts CB traffic, and the VI sampler reads DCC via COMPRESSION_EN. Fast clears
+    * stay disabled in this range: the eliminate pass costs more than it saves under
+    * 512², and a CLEAR_0000 encoding is not sampled correctly unless that pass runs.
+    * The kernel reports the whole Polaris 10 die as CHIP_POLARIS10.
+    */
+   if (pdev->info.gfx_level != GFX8)
+      return false;
+   if (pdev->info.family != CHIP_POLARIS10)
+      return false;
+   if (image->vk.samples > 1)
+      return false;
+   if (!(image->vk.usage & VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR))
+      return false;
+
+   const uint64_t pixels = (uint64_t)image->vk.extent.width * image->vk.extent.height;
+   return pixels >= 128ull * 128ull && pixels <= 512ull * 512ull;
 }
 
 static bool
@@ -251,7 +279,8 @@ radv_use_dcc_for_image_early(struct radv_device *device, struct radv_image *imag
    if (vk_format_is_subsampled(format) || (pdev->info.gfx_level < GFX12 && vk_format_get_plane_count(format) > 1))
       return false;
 
-   if (!radv_image_use_fast_clear_for_image_early(image) && image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+   if (!radv_image_use_fast_clear_for_image_early(image) && image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
+       !radv_polaris_dcc_without_fast_clear(pdev, image))
       return false;
 
    /* Do not enable DCC for mipmapped arrays because performance is worse. */
@@ -1240,6 +1269,23 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
 
       radv_surface_init(pdev, &info, &image->planes[plane].surface);
 
+      /* Polaris layered TC-compat HTILE is only kept when each HTILE slice is
+       * contiguous. addrlib sets sliceInterleaved when sliceSize is not a multiple
+       * of the pipe/bank alignment; meta_alignment_log2 is that alignment.
+       * Recompute without the flag so radv_clear_htile cannot corrupt a neighbor layer.
+       */
+      if (pdev->info.gfx_level == GFX8 && pdev->info.family == CHIP_POLARIS10 &&
+          (image->planes[plane].surface.flags & RADEON_SURF_TC_COMPATIBLE_HTILE) && image->vk.array_layers > 1) {
+         struct radeon_surf *surf = &image->planes[plane].surface;
+         const uint32_t align = surf->meta_alignment_log2 < 31 ? (1u << surf->meta_alignment_log2) : 0;
+         const bool interleaved = !surf->meta_size || !align || (surf->meta_slice_size % align) != 0;
+
+         if (interleaved) {
+            surf->flags &= ~RADEON_SURF_TC_COMPATIBLE_HTILE;
+            radv_surface_init(pdev, &info, surf);
+         }
+      }
+
       if (plane == 0) {
          if (!radv_use_dcc_for_image_late(device, image))
             ac_surface_zero_dcc_fields(&image->planes[0].surface);
@@ -1657,6 +1703,10 @@ radv_layout_can_fast_clear(const struct radv_device *device, const struct radv_i
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
    if (radv_dcc_enabled(image, level) && !radv_layout_dcc_compressed(device, image, level, layout, queue_mask))
+      return false;
+
+   /* Medium Polaris color targets use DCC but not fast clears, so no FCE is emitted. */
+   if (radv_dcc_enabled(image, level) && radv_polaris_dcc_without_fast_clear(pdev, image))
       return false;
 
    if (!(image->vk.usage & RADV_IMAGE_USAGE_WRITE_BITS))

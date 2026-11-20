@@ -2853,6 +2853,68 @@ non_uniform_access_callback(const nir_src *src, void *_)
    return nir_chase_binding(*src).success ? 0x2 : 0x3;
 }
 
+/* GFX8 can convert and load/store f16, but v_add_f16 / v_pk_*_f16 are GFX9+. */
+static bool
+radv_gfx8_fp16_op_is_native(nir_op op)
+{
+   switch (op) {
+   case nir_op_mov:
+   case nir_op_vec2:
+   case nir_op_vec3:
+   case nir_op_vec4:
+   case nir_op_vec5:
+   case nir_op_vec8:
+   case nir_op_vec16:
+   case nir_op_f2f16:
+   case nir_op_f2f16_rtz:
+   case nir_op_f2f16_rtne:
+   case nir_op_f2f16_ru:
+   case nir_op_f2f16_rd:
+   case nir_op_f2f32:
+   case nir_op_f2f64:
+   case nir_op_i2f16:
+   case nir_op_u2f16:
+   case nir_op_f2i16:
+   case nir_op_f2u16:
+   case nir_op_b2f16:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static unsigned
+radv_lower_bit_size_callback(const nir_instr *instr, void *data)
+{
+   const unsigned lowered = ac_nir_lower_bit_size_callback(instr, data);
+   if (lowered)
+      return lowered;
+
+   const enum amd_gfx_level gfx_level = *(const enum amd_gfx_level *)data;
+   if (gfx_level >= GFX9 || instr->type != nir_instr_type_alu)
+      return 0;
+
+   const nir_alu_instr *alu = nir_instr_as_alu(instr);
+   const nir_op_info *info = &nir_op_infos[alu->op];
+
+   if (radv_gfx8_fp16_op_is_native(alu->op))
+      return 0;
+
+   /* Float ALU stays on the f16<->f32 converters. Arithmetic itself runs at
+    * fp32, which matches the hardware and avoids emitting GFX9 opcodes.
+    */
+   if (alu->def.bit_size == 16 && nir_alu_type_get_base_type(info->output_type) == nir_type_float)
+      return 32;
+
+   for (unsigned i = 0; i < info->num_inputs; i++) {
+      if (nir_alu_type_get_base_type(info->input_types[i]) == nir_type_float &&
+          nir_src_bit_size(alu->src[i].src) == 16)
+         return 32;
+   }
+
+   return 0;
+}
+
 void
 radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struct radv_graphics_state_key *gfx_state,
                      struct radv_shader_stage *stage)
@@ -3160,11 +3222,14 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
 
    NIR_PASS(_, stage->nir, nir_lower_fp16_casts, nir_lower_fp16_split_fp64);
 
-   if (ac_nir_might_lower_bit_size(stage->nir)) {
+   /* GFX8 always runs this so shaderFloat16 ALU is lowered before isel.
+    * Later gens keep the previous "only if needed" check.
+    */
+   if (gfx_level == GFX8 || ac_nir_might_lower_bit_size(stage->nir)) {
       if (gfx_level >= GFX8)
          nir_divergence_analysis(stage->nir);
 
-      NIR_PASS(_, stage->nir, nir_lower_bit_size, ac_nir_lower_bit_size_callback, &gfx_level);
+      NIR_PASS(_, stage->nir, nir_lower_bit_size, radv_lower_bit_size_callback, &gfx_level);
    }
    if (gfx_level >= GFX8) {
       bool run_copy_prop = false;
@@ -3183,6 +3248,12 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
       if (!stage->key.optimisations_disabled && compiler_info->ac->has_packed_math_16bit) {
          NIR_PASS(_, stage->nir, nir_opt_vectorize, ac_nir_opt_vectorize_cb, &gfx_level);
       }
+
+      /* 16-bit texture opts can reintroduce f16 ALU. Lower it again on GFX8
+       * before nir_lower_alu_width, which would otherwise hand v_pk_* to ACO.
+       */
+      if (gfx_level == GFX8)
+         NIR_PASS(_, stage->nir, nir_lower_bit_size, radv_lower_bit_size_callback, &gfx_level);
    }
 
    /* cleanup passes */

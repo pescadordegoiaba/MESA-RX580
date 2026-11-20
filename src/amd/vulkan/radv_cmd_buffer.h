@@ -309,6 +309,12 @@ struct radv_cond_render_state {
    bool enabled_save;
    bool mec_inv_pred_emitted; /* To ensure we don't have to repeat inverting the VA. */
    uint8_t suspend_count;     /* Suspend/resume can be nested (meta ops inside barriers). */
+   /* Secondary command buffer recorded with conditionalRenderingEnable.
+    * user_va/emulated_va point at a slot the primary fills at execute time.
+    * inherited_bo is the BO that owns that slot.
+    */
+   bool inherited;
+   struct radeon_winsys_bo *inherited_bo;
 };
 
 struct radv_cmd_state {
