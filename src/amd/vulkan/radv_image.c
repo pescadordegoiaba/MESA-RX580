@@ -151,35 +151,52 @@ radv_rx580_color_target(const struct radv_physical_device *pdev, const struct ra
    return true;
 }
 
+static uint64_t
+radv_rx580_edge_pixels(int edge)
+{
+   if (edge <= 0)
+      return 0;
+   return (uint64_t)edge * (uint64_t)edge;
+}
+
 bool
 radv_polaris_extra_dcc(const struct radv_physical_device *pdev, const struct radv_image *image)
 {
    /* The generic cutoff refuses DCC at or below 512² because that path also
-    * turns on fast clears. On the RX 580 the sampler can read DCC
-    * (COMPRESSION_EN), so color targets from 64² up to that cutoff still
-    * get DCC. Smaller than 64², the init and the layout transition cost more
-    * than the bandwidth they save. Larger than 512² already follows the
-    * generic path.
+    * turns on fast clears. The edges come from drirc (radv_rx580_dcc_min /
+    * radv_rx580_dcc_max) so the MESA-RX580 panel can move the band without
+    * a rebuild. 0 disables the extra band. Larger than the max edge follows
+    * the generic path.
     */
    uint64_t pixels;
+   const int min_edge = pdev->drirc.performance.rx580_dcc_min;
+   const int max_edge = pdev->drirc.performance.rx580_dcc_max;
+
    if (!radv_rx580_color_target(pdev, image, &pixels))
       return false;
-   return pixels >= 64ull * 64ull && pixels <= 512ull * 512ull;
+   if (min_edge <= 0 || max_edge < min_edge)
+      return false;
+   return pixels >= radv_rx580_edge_pixels(min_edge) && pixels <= radv_rx580_edge_pixels(max_edge);
 }
 
 bool
 radv_polaris_dcc_without_fast_clear(const struct radv_physical_device *pdev, const struct radv_image *image)
 {
-   /* Fast clear pays for itself once the clear itself is a large write.
-    * Below 256² the eliminate pass (a full read and write, plus a meta
-    * dispatch) loses to plain DCC, and CLEAR_0000 is not sampled correctly
-    * unless that pass runs. From 256² to 512² DCC stays on and fast clear
-    * is allowed. Above 512² the generic heuristic already fast-clears.
+   /* radv_rx580_dcc_fast_clear is the edge where fast clear starts. Below it
+    * the eliminate pass costs more than the clear it saves, and CLEAR_0000
+    * is not sampled correctly unless that pass runs. 0 keeps the whole extra
+    * band expanded.
     */
    uint64_t pixels;
+   const int fast_clear_edge = pdev->drirc.performance.rx580_dcc_fast_clear;
+
    if (!radv_polaris_extra_dcc(pdev, image))
       return false;
-   return radv_rx580_color_target(pdev, image, &pixels) && pixels < 256ull * 256ull;
+   if (fast_clear_edge <= 0)
+      return true;
+   if (!radv_rx580_color_target(pdev, image, &pixels))
+      return false;
+   return pixels < radv_rx580_edge_pixels(fast_clear_edge);
 }
 
 static bool
@@ -399,12 +416,14 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
    /* Do not enable HTILE for very small images because it seems less performant but make sure it's
     * allowed with VRS attachments because we need HTILE on GFX10.3.
     *
-    * Non-MSAA depth on the RX 580 still wins from 4×4 up. The metadata is a
-    * handful of bytes and the DB traffic is the expensive part. MSAA keeps
-    * the 8×8 floor: those surfaces are already tiled more heavily.
+    * Non-MSAA depth on the RX 580 uses radv_rx580_htile_min (default 4).
+    * MSAA keeps the 8×8 floor: those surfaces are already tiled more heavily.
     */
-   const unsigned min_pixels =
-      (pdev->info.family == CHIP_POLARIS10 && gfx_level == GFX8 && image->vk.samples == 1) ? 4 * 4 : 8 * 8;
+   unsigned min_pixels = 8 * 8;
+   if (pdev->info.family == CHIP_POLARIS10 && gfx_level == GFX8 && image->vk.samples == 1) {
+      const int edge = MAX2(pdev->drirc.performance.rx580_htile_min, 1);
+      min_pixels = (unsigned)edge * (unsigned)edge;
+   }
    if (image->vk.extent.width * image->vk.extent.height < min_pixels &&
        !(gfx_level == GFX10_3 && device->vk.enabled_features.attachmentFragmentShadingRate))
       return false;

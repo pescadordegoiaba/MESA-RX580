@@ -116,6 +116,30 @@ Formatos que o Mesa já emula no upstream permanecem como estão. Este fork não
 - Dois primaries executando ao mesmo tempo o mesmo secundário com predicados diferentes compartilham o slot de predicado desse secundário. Uso simultâneo com predicados distintos pode correr.
 - A fila de transfer não acelera imagem que ainda está com DCC ou HTILE comprimido. Essa cópia cai no compute.
 
+## Painel
+
+`rx580/mesa-rx580-panel.py` é uma janela GTK 4. Ela grava as opções `radv_rx580_*` em `~/.drirc`. O RADV lê esse arquivo quando o dispositivo Vulkan é criado. Fechar e abrir o jogo aplica a mudança. Não é preciso recompilar o driver para mexer nos limiares.
+
+O que a janela controla, só na Polaris 10:
+
+- bordas do DCC extra e do fast clear;
+- prender render target, depth e buffer dedicado na VRAM, e o tamanho mínimo;
+- prioridade de heaps device-local grandes, que continuam podendo ir para GTT;
+- piso do HTILE em depth sem MSAA;
+- `shaderFloat16`, fila SDMA e `inheritedConditionalRendering`.
+
+## Instalar o driver e o painel
+
+Na raiz do repositório:
+
+```bash
+./rx580/install.sh
+```
+
+Isso compila `libvulkan_radeon.so`, instala a biblioteca em `~/.local/lib/mesa-rx580/`, o ICD em `~/.local/share/vulkan/icd.d/mesa_rx580_icd.json` e o painel em `~/.local/bin/mesa-rx580-panel`. Também grava `VK_DRIVER_FILES` em `~/.config/environment.d/99-mesa-rx580.conf`. Apague esse arquivo para voltar ao Mesa do sistema. É preciso entrar de novo na sessão.
+
+`--no-session` instala os arquivos sem trocar o driver da sessão. `--system` instala em `/usr/local`.
+
 ## Compilar só o RADV
 
 Dependências usadas neste desenvolvimento: meson, ninja, gcc, libdrm, wayland, xcb, glslang, spirv-tools, libelf, zlib, zstd, expat.

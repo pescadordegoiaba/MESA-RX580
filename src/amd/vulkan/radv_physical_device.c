@@ -119,7 +119,10 @@ radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
     * uncompressed image copies do not disable compression. Other GPUs still
     * require RADV_PERFTEST=transfer_queue or radv_enable_transfer_queue.
     */
-   const bool polaris_sdma = pdev->info.family == CHIP_POLARIS10;
+   /* radv_rx580_transfer_queue is the panel switch. The older drirc flag
+    * still opts other GPUs in.
+    */
+   const bool polaris_sdma = pdev->info.family == CHIP_POLARIS10 && pdev->drirc.performance.rx580_transfer_queue;
    if (pdev->info.sdma_ip_version == SDMA_UNKNOWN || !pdev->info.ip[AMD_IP_SDMA].num_queues ||
        (!polaris_sdma && !(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE) &&
         !pdev->drirc.performance.enable_transfer_queue))
@@ -234,7 +237,10 @@ radv_shader_fp16_enabled(const struct radv_physical_device *pdev)
    if (pdev->info.gfx_level != GFX8)
       return false;
 
-   return pdev->info.family == CHIP_POLARIS10 || pdev->drirc.features.enable_float16_gfx8;
+   if (pdev->info.family == CHIP_POLARIS10)
+      return pdev->drirc.performance.rx580_float16 || pdev->drirc.features.enable_float16_gfx8;
+
+   return pdev->drirc.features.enable_float16_gfx8;
 }
 
 bool
@@ -1193,7 +1199,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       /* Software, RX 580 only: secondaries record predicated packets and the
        * primary copies its predicate into the secondary's slot at execute time.
        */
-      .inheritedConditionalRendering = pdev->info.family == CHIP_POLARIS10,
+      .inheritedConditionalRendering =
+         pdev->info.family == CHIP_POLARIS10 && pdev->drirc.performance.rx580_inherited_conditional,
 
       /* VK_KHR_vertex_attribute_divisor */
       .vertexAttributeInstanceRateDivisor = true,

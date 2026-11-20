@@ -185,18 +185,21 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
        * Priority is raised so the kernel evicts these last. The app's own
        * VkMemoryPriorityAllocateInfoEXT still wins when it is higher.
        */
-      if (pdev->info.gfx_level == GFX8 && pdev->info.family == CHIP_POLARIS10 && domain == RADEON_DOMAIN_VRAM &&
+      if (pdev->info.gfx_level == GFX8 && pdev->info.family == CHIP_POLARIS10 &&
+          pdev->drirc.performance.rx580_pin_vram && domain == RADEON_DOMAIN_VRAM &&
           (flags & RADEON_FLAG_NO_CPU_ACCESS) && !mem->vk.export_handle_types) {
+         const uint64_t buffer_min = (uint64_t)MAX2(pdev->drirc.performance.rx580_pin_buffer_kb, 0) * 1024ull;
+         const uint64_t heap_min = (uint64_t)MAX2(pdev->drirc.performance.rx580_large_heap_mb, 0) * 1024ull * 1024ull;
          const bool attachment =
             mem->image && (mem->image->vk.usage & (VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR |
                                                    VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR));
-         const bool large_buffer = mem->buffer && mem->buffer->vk.size >= 256ull * 1024ull;
+         const bool large_buffer = buffer_min > 0 && mem->buffer && mem->buffer->vk.size >= buffer_min;
 
          if (attachment || large_buffer) {
             flags |= RADEON_FLAG_NO_GTT_SPILL;
             rx580_pin_vram = true;
             priority = MAX2(priority, attachment ? 26u : 22u);
-         } else if (alloc_size >= 8ull * 1024ull * 1024ull) {
+         } else if (heap_min > 0 && alloc_size >= heap_min) {
             /* Big device-local heaps are usually the RT/depth suballocator.
              * Leave them spillable, but ahead of the default 0.5 priority.
              */
