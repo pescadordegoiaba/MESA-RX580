@@ -53,6 +53,10 @@ enum radeon_bo_flag { /* bitfield */
                       RADEON_FLAG_VM_PAD_1PAGE = (1 << 14),
                       RADEON_FLAG_ENCRYPTED = (1 << 15),
                       RADEON_FLAG_EMULATE_SPARSE_RESIDENCY = (1 << 16),
+                      /* VRAM placement only. Do not also allow GTT, so the
+                       * kernel will not spill this BO under pressure.
+                       */
+                      RADEON_FLAG_NO_GTT_SPILL = (1 << 17),
 };
 
 enum radeon_ctx_priority {

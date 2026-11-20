@@ -411,7 +411,10 @@ void radv_image_bo_set_metadata(struct radv_device *device, struct radv_image *i
 
 bool radv_image_can_fast_clear(const struct radv_device *device, const struct radv_image *image);
 
-/* RX 580 / Polaris 10 only: DCC is enabled, fast clears are not. See radv_image.c. */
+/* RX 580 / Polaris 10: DCC below the generic fast-clear cutoff. See radv_image.c. */
+bool radv_polaris_extra_dcc(const struct radv_physical_device *pdev, const struct radv_image *image);
+
+/* Subset of radv_polaris_extra_dcc that must not fast-clear. */
 bool radv_polaris_dcc_without_fast_clear(const struct radv_physical_device *pdev, const struct radv_image *image);
 
 struct ac_surf_info radv_get_ac_surf_info(struct radv_device *device, const struct radv_image *image);

@@ -117,6 +117,9 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
    unsigned priority =
       MIN2(RADV_BO_PRIORITY_APPLICATION_MAX - 1, (int)(priority_float * RADV_BO_PRIORITY_APPLICATION_MAX));
 
+   /* Filled in once the domain and flags are known. RX 580 only. */
+   bool rx580_pin_vram = false;
+
    if (mem->vk.ahardware_buffer) {
       result = radv_import_ahb_memory(device, mem, priority);
       if (result != VK_SUCCESS)
@@ -174,6 +177,33 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
          flags |= RADEON_FLAG_GFX12_ALLOW_DCC;
       }
 
+      /* RX 580: keep render targets, depth and large dedicated buffers in
+       * VRAM. Host-visible and exported memory stay spillable (BAR and
+       * display need GTT). This is the selective form of
+       * RADV_PERFTEST=nogttspill: one BO, not the whole device. If VRAM
+       * cannot hold it, the allocate below retries with spill enabled.
+       * Priority is raised so the kernel evicts these last. The app's own
+       * VkMemoryPriorityAllocateInfoEXT still wins when it is higher.
+       */
+      if (pdev->info.gfx_level == GFX8 && pdev->info.family == CHIP_POLARIS10 && domain == RADEON_DOMAIN_VRAM &&
+          (flags & RADEON_FLAG_NO_CPU_ACCESS) && !mem->vk.export_handle_types) {
+         const bool attachment =
+            mem->image && (mem->image->vk.usage & (VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR |
+                                                   VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR));
+         const bool large_buffer = mem->buffer && mem->buffer->vk.size >= 256ull * 1024ull;
+
+         if (attachment || large_buffer) {
+            flags |= RADEON_FLAG_NO_GTT_SPILL;
+            rx580_pin_vram = true;
+            priority = MAX2(priority, attachment ? 26u : 22u);
+         } else if (alloc_size >= 8ull * 1024ull * 1024ull) {
+            /* Big device-local heaps are usually the RT/depth suballocator.
+             * Leave them spillable, but ahead of the default 0.5 priority.
+             */
+            priority = MAX2(priority, 18u);
+         }
+      }
+
       if (device->overallocation_disallowed) {
          uint64_t total_size = pdev->memory_properties.memoryHeaps[heap_index].size;
 
@@ -189,6 +219,16 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
 
       result = radv_bo_create(device, &mem->vk.base, alloc_size, pdev->info.max_alignment, domain, flags, priority,
                               replay_address, is_internal, &mem->bo);
+
+      if (result != VK_SUCCESS && rx580_pin_vram) {
+         /* VRAM is full. Fall back to the normal spillable placement
+          * instead of failing the application allocation.
+          */
+         flags &= ~RADEON_FLAG_NO_GTT_SPILL;
+         rx580_pin_vram = false;
+         result = radv_bo_create(device, &mem->vk.base, alloc_size, pdev->info.max_alignment, domain, flags, priority,
+                                 replay_address, is_internal, &mem->bo);
+      }
 
       if (result != VK_SUCCESS) {
          if (device->overallocation_disallowed) {

@@ -586,8 +586,13 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
        * of unnecessary movement. This helps significantly when
        * e.g. Horizon Zero Dawn allocates more memory than we have
        * VRAM.
+       *
+       * RADEON_FLAG_NO_GTT_SPILL skips the GTT placement for a single
+       * BO. The RX 580 path uses it for render targets, depth and
+       * large dedicated buffers, and retries without the flag if VRAM
+       * cannot hold the allocation.
        */
-      if (ws->gtt_spill)
+      if (ws->gtt_spill && !(flags & RADEON_FLAG_NO_GTT_SPILL))
          request.preferred_heap |= AMDGPU_GEM_DOMAIN_GTT;
    }
 

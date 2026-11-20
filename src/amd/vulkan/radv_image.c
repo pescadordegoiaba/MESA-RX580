@@ -137,26 +137,49 @@ radv_surface_has_scanout(struct radv_device *device, const struct radv_image_cre
    return info->scanout;
 }
 
-bool
-radv_polaris_dcc_without_fast_clear(const struct radv_physical_device *pdev, const struct radv_image *image)
+static bool
+radv_rx580_color_target(const struct radv_physical_device *pdev, const struct radv_image *image, uint64_t *pixels)
 {
-   /* RX 580 (Polaris 10) is bandwidth-bound. DCC on a medium color target still
-    * cuts CB traffic, and the VI sampler reads DCC via COMPRESSION_EN. Fast clears
-    * stay disabled in this range: the eliminate pass costs more than it saves under
-    * 512², and a CLEAR_0000 encoding is not sampled correctly unless that pass runs.
-    * The kernel reports the whole Polaris 10 die as CHIP_POLARIS10.
-    */
-   if (pdev->info.gfx_level != GFX8)
-      return false;
-   if (pdev->info.family != CHIP_POLARIS10)
+   if (pdev->info.gfx_level != GFX8 || pdev->info.family != CHIP_POLARIS10)
       return false;
    if (image->vk.samples > 1)
       return false;
    if (!(image->vk.usage & VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR))
       return false;
 
-   const uint64_t pixels = (uint64_t)image->vk.extent.width * image->vk.extent.height;
-   return pixels >= 128ull * 128ull && pixels <= 512ull * 512ull;
+   *pixels = (uint64_t)image->vk.extent.width * image->vk.extent.height;
+   return true;
+}
+
+bool
+radv_polaris_extra_dcc(const struct radv_physical_device *pdev, const struct radv_image *image)
+{
+   /* The generic cutoff refuses DCC at or below 512² because that path also
+    * turns on fast clears. On the RX 580 the sampler can read DCC
+    * (COMPRESSION_EN), so color targets from 64² up to that cutoff still
+    * get DCC. Smaller than 64², the init and the layout transition cost more
+    * than the bandwidth they save. Larger than 512² already follows the
+    * generic path.
+    */
+   uint64_t pixels;
+   if (!radv_rx580_color_target(pdev, image, &pixels))
+      return false;
+   return pixels >= 64ull * 64ull && pixels <= 512ull * 512ull;
+}
+
+bool
+radv_polaris_dcc_without_fast_clear(const struct radv_physical_device *pdev, const struct radv_image *image)
+{
+   /* Fast clear pays for itself once the clear itself is a large write.
+    * Below 256² the eliminate pass (a full read and write, plus a meta
+    * dispatch) loses to plain DCC, and CLEAR_0000 is not sampled correctly
+    * unless that pass runs. From 256² to 512² DCC stays on and fast clear
+    * is allowed. Above 512² the generic heuristic already fast-clears.
+    */
+   uint64_t pixels;
+   if (!radv_polaris_extra_dcc(pdev, image))
+      return false;
+   return radv_rx580_color_target(pdev, image, &pixels) && pixels < 256ull * 256ull;
 }
 
 static bool
@@ -280,7 +303,7 @@ radv_use_dcc_for_image_early(struct radv_device *device, struct radv_image *imag
       return false;
 
    if (!radv_image_use_fast_clear_for_image_early(image) && image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
-       !radv_polaris_dcc_without_fast_clear(pdev, image))
+       !radv_polaris_extra_dcc(pdev, image))
       return false;
 
    /* Do not enable DCC for mipmapped arrays because performance is worse. */
@@ -375,8 +398,14 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
 
    /* Do not enable HTILE for very small images because it seems less performant but make sure it's
     * allowed with VRS attachments because we need HTILE on GFX10.3.
+    *
+    * Non-MSAA depth on the RX 580 still wins from 4×4 up. The metadata is a
+    * handful of bytes and the DB traffic is the expensive part. MSAA keeps
+    * the 8×8 floor: those surfaces are already tiled more heavily.
     */
-   if (image->vk.extent.width * image->vk.extent.height < 8 * 8 &&
+   const unsigned min_pixels =
+      (pdev->info.family == CHIP_POLARIS10 && gfx_level == GFX8 && image->vk.samples == 1) ? 4 * 4 : 8 * 8;
+   if (image->vk.extent.width * image->vk.extent.height < min_pixels &&
        !(gfx_level == GFX10_3 && device->vk.enabled_features.attachmentFragmentShadingRate))
       return false;
 

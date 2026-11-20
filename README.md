@@ -31,9 +31,14 @@ Arquivos: `src/amd/vulkan/radv_image.c`, `src/amd/vulkan/radv_image.h`, `src/amd
 
 No Mesa, DCC e fast clear nascem juntos. Abaixo de 512×512 o driver recusa os dois, porque o passe de fast-clear eliminate lê e reescreve a imagem inteira. Na RX 580 esse passe perde para o ganho em alvos pequenos, mas a compressão delta do color buffer ainda vale a pena no meio do caminho.
 
-Para a RX 580, imagens de cor de uma amostra entre 128×128 e 512×512 passam a ter DCC. Fast clear continua desligado nessa faixa. A superfície nasce com DCC expandido (`DCC_UNCOMPRESSED`), não com o código `CLEAR_0000`. O sampler do GFX8 lê DCC pelo bit `COMPRESSION_EN`, e não aplica sozinho a cor de fast clear. O color buffer continua compactando os pixels que desenha.
+Para a RX 580, imagens de cor de uma amostra a partir de 64×64 e até 512×512 ganham DCC mesmo quando a heurística genérica recusa o fast clear. A escolha entre fast clear e compressão normal depende do tamanho:
 
-Imagens maiores que 512×512 seguem a heurística original, com fast clear. MSAA com DCC continua desligado: o RADV ainda não cobre esse caminho no GFX8. DCC de storage image também continua desligado, porque store no GFX8 descomprime.
+- abaixo de 64×64, sem DCC: a inicialização custa mais do que a banda economizada;
+- de 64×64 até abaixo de 256×256, DCC sem fast clear, superfície expandida (`DCC_UNCOMPRESSED`), porque o eliminate lê e reescreve a imagem inteira;
+- de 256×256 até 512×512, DCC com fast clear: o clear em si já é uma escrita grande;
+- acima de 512×512, o caminho genérico do Mesa, que já faz DCC e fast clear.
+
+O sampler do GFX8 lê DCC pelo bit `COMPRESSION_EN` e não aplica sozinho a cor de fast clear. Por isso a faixa sem fast clear não nasce com `CLEAR_0000`. MSAA com DCC continua desligado. DCC de storage image também, porque store no GFX8 descomprime.
 
 ### HTILE em depth arrays
 
@@ -65,7 +70,22 @@ A SDMA dessa geração não lê DCC nem HTILE. `radv_sdma_supports_image` devolv
 
 A coerência entre CP e SDMA no GFX6–8 já está no Mesa: nenhum dos dois usa a L2, e o postamble da fila de gráficos esvazia CB/DB antes do fence. `radv_queue.c` não precisou de lógica nova.
 
-### inheritedConditionalRendering
+### VRAM na RX 580
+
+Arquivos: `src/amd/vulkan/radv_device_memory.c`, `src/amd/vulkan/radv_radeon_winsys.h`, `src/amd/vulkan/winsys/amdgpu/radv_amdgpu_bo.c`.
+
+O RADV, por padrão, marca alocações de VRAM também como GTT. O kernel prefere VRAM no início e pode derramar o BO para a RAM do sistema quando a placa enche. `RADV_PERFTEST=nogttspill` desliga isso para tudo e, com a VRAM lotada, a alocação falha.
+
+Neste fork o derramamento é recusado só na Polaris 10, e só para memória device-local sem acesso da CPU:
+
+- imagem dedicada de color attachment ou depth/stencil;
+- buffer dedicado de pelo menos 256 KiB.
+
+Esses BOs recebem `RADEON_FLAG_NO_GTT_SPILL`. A prioridade sobe para 26 em attachment e 22 em buffer grande, sem ultrapassar uma prioridade que a aplicação já tenha pedido. Heaps device-local de 8 MiB ou mais, típicos do suballocator de render target, continuam podendo ir para GTT, mas com prioridade 18, acima do padrão 0,5. Memória visível pela CPU, exportada ou já colocada em GTT não entra nessa regra.
+
+Se a VRAM não couber o BO preso, a alocação é tentada de novo com spill. A aplicação não toma `VK_ERROR_OUT_OF_DEVICE_MEMORY` só porque o pin falhou.
+
+## inheritedConditionalRendering
 
 Arquivos: `src/amd/vulkan/radv_physical_device.c`, `src/amd/vulkan/radv_cmd_buffer.c`, `src/amd/vulkan/radv_cmd_buffer.h`.
 
@@ -91,7 +111,7 @@ Formatos que o Mesa já emula no upstream permanecem como estão. Este fork não
 ## Limites conhecidos
 
 - Fast clear em alvos de 128² a 512² fica de fora de propósito. O clear vira desenho pelo color buffer, que ainda comprime via DCC.
-- HTILE de array só permanece TC-compat quando o slice não está intercalado. No caso intercalado o comportamento volta ao Mesa: HTILE sem leitura comprimida.
+- HTILE de array só permanece TC-compat quando o slice não está intercalado. No caso intercalado o comportamento volta ao Mesa: HTILE sem leitura comprimida. Em depth sem MSAA o piso de tamanho cai de 8×8 para 4×4. Mipmaps continuam sem HTILE no GFX8.
 - `shaderFloat16` não dobra a taxa de ALU. O ganho está em carga, armazenagem e conversão de 16 bits.
 - Dois primaries executando ao mesmo tempo o mesmo secundário com predicados diferentes compartilham o slot de predicado desse secundário. Uso simultâneo com predicados distintos pode correr.
 - A fila de transfer não acelera imagem que ainda está com DCC ou HTILE comprimido. Essa cópia cai no compute.
@@ -133,4 +153,7 @@ Para testar sem substituir o Mesa do sistema, aponte o loader para o ICD gerado 
 - `src/amd/vulkan/radv_cmd_buffer.h`
 - `src/amd/vulkan/radv_physical_device.c`
 - `src/amd/vulkan/radv_shader.c`
+- `src/amd/vulkan/radv_device_memory.c`
+- `src/amd/vulkan/radv_radeon_winsys.h`
+- `src/amd/vulkan/winsys/amdgpu/radv_amdgpu_bo.c`
 - `README.md`
