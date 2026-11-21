@@ -223,17 +223,14 @@ radv_shader_fp16_enabled(const struct radv_physical_device *pdev)
    if (pdev->info.compiler_info.has_packed_math_16bit)
       return true;
 
-   /* The RX 580 (Polaris 10) has f16 conversions and unpacked D16 loads, but
-    * not v_add_f16 or packed fp16 ALU. shaderFloat16 is advertised only on
-    * that chip: radv_postprocess_nir lowers unsupported fp16 ALU to fp32 and
-    * keeps the conversions. radv_enable_float16_gfx8 remains an explicit
-    * opt-in for any other GFX8.
+   /* Do not advertise shaderFloat16 on the RX 580. Polaris has no packed
+    * fp16 ALU. Engines then emit 16-bit shaders, the driver lowers them to
+    * fp32, VGPR use and scratch grow, and after a long session the frametime
+    * oscillates. radv_rx580_float16 is ignored so an old ~/.drirc cannot
+    * turn it back on. radv_enable_float16_gfx8 remains the explicit opt-in.
     */
    if (pdev->info.gfx_level != GFX8)
       return false;
-
-   if (pdev->info.family == CHIP_POLARIS10)
-      return pdev->drirc.performance.rx580_float16 || pdev->drirc.features.enable_float16_gfx8;
 
    return pdev->drirc.features.enable_float16_gfx8;
 }

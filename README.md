@@ -37,7 +37,7 @@ Arquivos: `src/amd/vulkan/radv_physical_device.c`, `src/amd/vulkan/radv_shader.c
 
 A RX 580 converte FP16 (`v_cvt_f16_f32`, `v_cvt_f32_f16`) e faz load/store D16 unpacked. Não tem ALU packed de meia precisão. `v_add_f16` e `v_pk_*_f16` são GFX9+.
 
-O fork anuncia `shaderFloat16` na Polaris 10 sem depender de `radv_enable_float16_gfx8`. O compilador, em GFX8, rebaixa a ALU float16 para FP32 e conserva as conversões e o tráfego de 16 bits na memória. O resultado numérico segue o FP32 arredondado de volta para FP16. A flag antiga do drirc continua como opt-in manual para outro GFX8.
+`shaderFloat16` fica desligado na RX 580, e um `~/.drirc` antigo não religa. A placa não tem ALU packed de FP16. Anunciar a feature faz o jogo emitir shaders de 16 bits, o driver rebaixa a conta para FP32 e o uso de VGPR sobe. Numa sessão longa entram shaders novos, o scratch cresce e o tempo de quadro oscila. Quem quiser testar usa `radv_enable_float16_gfx8`. O rebaixamento só roda em shader que realmente tem float de 16 bits.
 
 `storageInputOutput16` não foi ligado. Varying packed de 16 bits pede a matemática que esta placa não tem.
 
@@ -83,10 +83,9 @@ Formatos que o Mesa já emula no upstream permanecem como estão. Este fork não
 O que a janela ainda controla, só na Polaris 10:
 
 - piso do HTILE em depth sem MSAA, no mínimo 8;
-- `shaderFloat16`;
 - `inheritedConditionalRendering`.
 
-Aplicar apaga do `~/.drirc` as chaves antigas de DCC extra, pin de VRAM e fila SDMA. O driver também ignora essas chaves se elas ainda estiverem no arquivo.
+Aplicar apaga do `~/.drirc` as chaves antigas de DCC extra, pin de VRAM, fila SDMA e `shaderFloat16`. O driver também ignora essas chaves se elas ainda estiverem no arquivo.
 
 ## Instalar o driver e o painel
 

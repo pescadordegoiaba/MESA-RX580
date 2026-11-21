@@ -22,15 +22,13 @@ STRIP = {
     "radv_rx580_pin_buffer_kb",
     "radv_rx580_large_heap_mb",
     "radv_rx580_transfer_queue",
+    "radv_rx580_float16",
 }
 
 OPTIONS = [
     ("radv_rx580_htile_min", "int", 8, 8, 256,
      "HTILE em depth sem MSAA a partir de (px)",
      "O driver não aceita menos que 8. Esse é o piso do Mesa. Subir desliga HTILE em depth pequeno."),
-    ("radv_rx580_float16", "bool", True, None, None,
-     "shaderFloat16",
-     "Anuncia float16. A ALU continua em FP32. Conversão e tráfego de 16 bits ficam no hardware."),
     ("radv_rx580_inherited_conditional", "bool", True, None, None,
      "inheritedConditionalRendering",
      "Predicação herdada por command buffer secundário, em software."),
@@ -141,8 +139,9 @@ class Panel(Gtk.ApplicationWindow):
         intro = Gtk.Label(
             label="Ajustes do RADV para a RX 580 (Polaris 10). "
                   "Eles valem no próximo processo Vulkan. O painel grava ~/.drirc. "
-                  "DCC extra, fila SDMA e o pin de VRAM foram retirados: depois de uma sessão longa "
-                  "eles faziam a tela piscar e o FPS oscilar. Aplicar também apaga essas chaves antigas.",
+                  "DCC extra, fila SDMA, pin de VRAM e shaderFloat16 foram retirados: "
+                  "os três primeiros piscam ou oscilam o FPS, e o float16 aumenta VGPR "
+                  "conforme shaders novos entram na sessão. Aplicar apaga essas chaves antigas.",
             wrap=True,
             xalign=0,
         )

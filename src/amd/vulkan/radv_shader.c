@@ -3222,10 +3222,12 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
 
    NIR_PASS(_, stage->nir, nir_lower_fp16_casts, nir_lower_fp16_split_fp64);
 
-   /* GFX8 always runs this so shaderFloat16 ALU is lowered before isel.
-    * Later gens keep the previous "only if needed" check.
+   /* Only shaders that actually contain 16-bit float pay for the GFX8
+    * lowering and the divergence analysis. Running both on every Polaris
+    * shader stretched pipeline compilation through a long session.
     */
-   if (gfx_level == GFX8 || ac_nir_might_lower_bit_size(stage->nir)) {
+   const bool gfx8_fp16 = gfx_level == GFX8 && (stage->nir->info.bit_sizes_float & 16);
+   if (gfx8_fp16 || ac_nir_might_lower_bit_size(stage->nir)) {
       if (gfx_level >= GFX8)
          nir_divergence_analysis(stage->nir);
 
@@ -3249,10 +3251,10 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
          NIR_PASS(_, stage->nir, nir_opt_vectorize, ac_nir_opt_vectorize_cb, &gfx_level);
       }
 
-      /* 16-bit texture opts can reintroduce f16 ALU. Lower it again on GFX8
-       * before nir_lower_alu_width, which would otherwise hand v_pk_* to ACO.
+      /* 16-bit texture opts can reintroduce f16 ALU. Lower it again before
+       * nir_lower_alu_width, which would otherwise hand v_pk_* to ACO.
        */
-      if (gfx_level == GFX8)
+      if (gfx_level == GFX8 && (run_copy_prop || (stage->nir->info.bit_sizes_float & 16)))
          NIR_PASS(_, stage->nir, nir_lower_bit_size, radv_lower_bit_size_callback, &gfx_level);
    }
 
