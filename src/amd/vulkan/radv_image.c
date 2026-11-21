@@ -102,14 +102,10 @@ radv_use_tc_compat_htile_for_image(struct radv_device *device, const struct radv
 
       /* TC-compat HTILE for layered images can have interleaved slices (see sliceInterleaved flag
        * in addrlib).  radv_clear_htile addresses one layer as a contiguous meta slice, which is
-       * wrong when slices are interleaved.
-       *
-       * On the RX 580 (Polaris 10), shadow-map arrays are the common case. Ask for
-       * TC-compat here and drop it after surface init when the slice size is not
-       * pipe-aligned (see radv_image_create_layout). Other GFX8 chips keep the
-       * blanket rejection.
+       * wrong when slices are interleaved. Guessing alignment after the fact still left
+       * some Polaris shadow arrays compressed and corrupted the neighbor layer.
        */
-      if (image->vk.array_layers > 1 && pdev->info.family != CHIP_POLARIS10)
+      if (image->vk.array_layers > 1)
          return false;
    }
 
@@ -162,21 +158,17 @@ radv_rx580_edge_pixels(int edge)
 bool
 radv_polaris_extra_dcc(const struct radv_physical_device *pdev, const struct radv_image *image)
 {
-   /* The generic cutoff refuses DCC at or below 512² because that path also
-    * turns on fast clears. The edges come from drirc (radv_rx580_dcc_min /
-    * radv_rx580_dcc_max) so the MESA-RX580 panel can move the band without
-    * a rebuild. 0 disables the extra band. Larger than the max edge follows
-    * the generic path.
+   /* Do not widen DCC on the RX 580. The extra band below the generic 512²
+    * cutoff initialized some targets as DCC_UNCOMPRESSED and skipped fast
+    * clear. On GFX8 the texture unit reads COMPRESSION_EN and does not
+    * apply the clear code itself, so CB and TC metadata drift. After a
+    * long session the color target flickers and the frametime jumps.
+    * drirc edges are ignored on purpose, including values already saved
+    * by the settings panel.
     */
-   uint64_t pixels;
-   const int min_edge = pdev->drirc.performance.rx580_dcc_min;
-   const int max_edge = pdev->drirc.performance.rx580_dcc_max;
-
-   if (!radv_rx580_color_target(pdev, image, &pixels))
-      return false;
-   if (min_edge <= 0 || max_edge < min_edge)
-      return false;
-   return pixels >= radv_rx580_edge_pixels(min_edge) && pixels <= radv_rx580_edge_pixels(max_edge);
+   (void)pdev;
+   (void)image;
+   return false;
 }
 
 bool
@@ -416,12 +408,12 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
    /* Do not enable HTILE for very small images because it seems less performant but make sure it's
     * allowed with VRS attachments because we need HTILE on GFX10.3.
     *
-    * Non-MSAA depth on the RX 580 uses radv_rx580_htile_min (default 4).
-    * MSAA keeps the 8×8 floor: those surfaces are already tiled more heavily.
+    * Non-MSAA depth on the RX 580 may raise radv_rx580_htile_min, never
+    * lower it past the upstream 8x8 floor.
     */
    unsigned min_pixels = 8 * 8;
    if (pdev->info.family == CHIP_POLARIS10 && gfx_level == GFX8 && image->vk.samples == 1) {
-      const int edge = MAX2(pdev->drirc.performance.rx580_htile_min, 1);
+      const int edge = MAX2(pdev->drirc.performance.rx580_htile_min, 8);
       min_pixels = (unsigned)edge * (unsigned)edge;
    }
    if (image->vk.extent.width * image->vk.extent.height < min_pixels &&
@@ -1316,23 +1308,6 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
       }
 
       radv_surface_init(pdev, &info, &image->planes[plane].surface);
-
-      /* Polaris layered TC-compat HTILE is only kept when each HTILE slice is
-       * contiguous. addrlib sets sliceInterleaved when sliceSize is not a multiple
-       * of the pipe/bank alignment; meta_alignment_log2 is that alignment.
-       * Recompute without the flag so radv_clear_htile cannot corrupt a neighbor layer.
-       */
-      if (pdev->info.gfx_level == GFX8 && pdev->info.family == CHIP_POLARIS10 &&
-          (image->planes[plane].surface.flags & RADEON_SURF_TC_COMPATIBLE_HTILE) && image->vk.array_layers > 1) {
-         struct radeon_surf *surf = &image->planes[plane].surface;
-         const uint32_t align = surf->meta_alignment_log2 < 31 ? (1u << surf->meta_alignment_log2) : 0;
-         const bool interleaved = !surf->meta_size || !align || (surf->meta_slice_size % align) != 0;
-
-         if (interleaved) {
-            surf->flags &= ~RADEON_SURF_TC_COMPATIBLE_HTILE;
-            radv_surface_init(pdev, &info, surf);
-         }
-      }
 
       if (plane == 0) {
          if (!radv_use_dcc_for_image_late(device, image))

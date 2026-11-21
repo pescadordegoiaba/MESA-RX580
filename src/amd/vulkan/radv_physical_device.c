@@ -113,18 +113,13 @@ radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
 
    /* Check if the GPU has SDMA support and transfer queues are allowed.
     *
-    * The RX 580 (Polaris 10, SDMA 3.x) exposes the queue by default. SDMA there
-    * cannot read DCC/HTILE; radv_sdma_supports_image rejects those copies and
-    * the compute gang performs them instead, so async buffer copies and
-    * uncompressed image copies do not disable compression. Other GPUs still
-    * require RADV_PERFTEST=transfer_queue or radv_enable_transfer_queue.
+    * The RX 580 does not expose the queue by default. SDMA 3.x cannot read
+    * DCC or HTILE, and enabling it for a long session produced corrupted
+    * copies and unstable frametimes. radv_rx580_transfer_queue is ignored.
+    * RADV_PERFTEST=transfer_queue or radv_enable_transfer_queue still opt in.
     */
-   /* radv_rx580_transfer_queue is the panel switch. The older drirc flag
-    * still opts other GPUs in.
-    */
-   const bool polaris_sdma = pdev->info.family == CHIP_POLARIS10 && pdev->drirc.performance.rx580_transfer_queue;
    if (pdev->info.sdma_ip_version == SDMA_UNKNOWN || !pdev->info.ip[AMD_IP_SDMA].num_queues ||
-       (!polaris_sdma && !(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE) &&
+       (!(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE) &&
         !pdev->drirc.performance.enable_transfer_queue))
       return false;
 

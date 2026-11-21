@@ -13,34 +13,24 @@ DRIRC = os.path.join(os.path.expanduser("~"), ".drirc")
 MARKER = "MESA-RX580"
 
 # name, kind, default, minimum, maximum, label, help
+# Written by older panel builds. The driver ignores them. Apply removes them.
+STRIP = {
+    "radv_rx580_dcc_min",
+    "radv_rx580_dcc_fast_clear",
+    "radv_rx580_dcc_max",
+    "radv_rx580_pin_vram",
+    "radv_rx580_pin_buffer_kb",
+    "radv_rx580_large_heap_mb",
+    "radv_rx580_transfer_queue",
+}
+
 OPTIONS = [
-    ("radv_rx580_dcc_min", "int", 64, 0, 8192,
-     "DCC a partir de (px)",
-     "Menor borda de um alvo de cor que ainda recebe DCC extra. 0 desliga essa faixa."),
-    ("radv_rx580_dcc_fast_clear", "int", 256, 0, 8192,
-     "Fast clear a partir de (px)",
-     "Desta borda para cima o fast clear entra. Abaixo disso o DCC fica expandido. 0 nunca usa fast clear na faixa extra."),
-    ("radv_rx580_dcc_max", "int", 512, 0, 8192,
-     "DCC extra até (px)",
-     "Maior borda da faixa extra. Acima disso vale a heurística genérica do Mesa."),
-    ("radv_rx580_pin_vram", "bool", True, None, None,
-     "Prender render target e depth na VRAM",
-     "Recusa spill para GTT em attachment dedicado e em buffer dedicado grande. Se a VRAM não couber, o driver tenta de novo com spill."),
-    ("radv_rx580_pin_buffer_kb", "int", 256, 0, 1048576,
-     "Buffer dedicado preso a partir de (KiB)",
-     "0 não prende buffers. Attachments dedicados continuam presos enquanto a opção acima está ligada."),
-    ("radv_rx580_large_heap_mb", "int", 8, 0, 1048576,
-     "Prioridade maior a partir de (MiB)",
-     "Alocações device-local deste tamanho sobem na fila de despejo, mas ainda podem ir para GTT. 0 desliga."),
-    ("radv_rx580_htile_min", "int", 4, 1, 256,
+    ("radv_rx580_htile_min", "int", 8, 8, 256,
      "HTILE em depth sem MSAA a partir de (px)",
-     "8 volta ao piso original do Mesa. Vale só para depth de uma amostra."),
+     "O driver não aceita menos que 8. Esse é o piso do Mesa. Subir desliga HTILE em depth pequeno."),
     ("radv_rx580_float16", "bool", True, None, None,
      "shaderFloat16",
      "Anuncia float16. A ALU continua em FP32. Conversão e tráfego de 16 bits ficam no hardware."),
-    ("radv_rx580_transfer_queue", "bool", True, None, None,
-     "Fila de transferência SDMA",
-     "Expõe a fila assíncrona. Cópias com DCC ou HTILE comprimido continuam no compute."),
     ("radv_rx580_inherited_conditional", "bool", True, None, None,
      "inheritedConditionalRendering",
      "Predicação herdada por command buffer secundário, em software."),
@@ -105,7 +95,7 @@ def save_values(values):
     if device is None:
         device = ET.SubElement(root, "device", driver="radv")
 
-    wanted = {item[0] for item in OPTIONS}
+    wanted = {item[0] for item in OPTIONS} | STRIP
     for option in list(device.findall("option")):
         if option.get("name") in wanted:
             device.remove(option)
@@ -150,7 +140,9 @@ class Panel(Gtk.ApplicationWindow):
 
         intro = Gtk.Label(
             label="Ajustes do RADV para a RX 580 (Polaris 10). "
-                  "Eles valem no próximo processo Vulkan. O painel grava ~/.drirc.",
+                  "Eles valem no próximo processo Vulkan. O painel grava ~/.drirc. "
+                  "DCC extra, fila SDMA e o pin de VRAM foram retirados: depois de uma sessão longa "
+                  "eles faziam a tela piscar e o FPS oscilar. Aplicar também apaga essas chaves antigas.",
             wrap=True,
             xalign=0,
         )
