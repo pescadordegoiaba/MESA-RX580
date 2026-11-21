@@ -1,3 +1,5 @@
+# Contain Bugs with Instable FPS... coming soon version stable
+
 # MESA-RX580
 
 Driver Mesa com RADV ajustado para a **AMD Radeon RX 580** (Polaris 10 / Ellesmere / GFX8).
