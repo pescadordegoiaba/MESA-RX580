@@ -669,6 +669,13 @@ radv_sdma_supports_image(const struct radv_cmd_buffer *cmd_buffer, const struct 
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const uint32_t queue_mask = radv_image_queue_family_mask(image, cmd_buffer->qf);
 
+   /* Polaris SDMA image copies, compressed or not, were part of the
+    * corruption and the frametime swings. Buffer copies still use SDMA.
+    * Image copies fall back to the compute/graphics path.
+    */
+   if (pdev->info.family == CHIP_POLARIS10 && pdev->info.gfx_level == GFX8)
+      return false;
+
    /* Fallback to compute when SDMA doesn't support compression to avoid disabling DCC/HTILE for
     * concurrent images. Only GFX9 and older, Navi10 and GFX1013 are affected.
     */

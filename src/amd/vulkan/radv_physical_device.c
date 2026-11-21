@@ -113,13 +113,14 @@ radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
 
    /* Check if the GPU has SDMA support and transfer queues are allowed.
     *
-    * The RX 580 does not expose the queue by default. SDMA 3.x cannot read
-    * DCC or HTILE, and enabling it for a long session produced corrupted
-    * copies and unstable frametimes. radv_rx580_transfer_queue is ignored.
-    * RADV_PERFTEST=transfer_queue or radv_enable_transfer_queue still opt in.
+    * The RX 580 exposes the queue for buffer copies only. Image copies are
+    * rejected in radv_sdma_supports_image because SDMA 3.x corrupts tiled
+    * and compressed images. radv_rx580_transfer_queue can turn the queue off.
     */
+   const bool polaris_buffers = pdev->info.family == CHIP_POLARIS10 && pdev->info.gfx_level == GFX8 &&
+                                pdev->drirc.performance.rx580_transfer_queue;
    if (pdev->info.sdma_ip_version == SDMA_UNKNOWN || !pdev->info.ip[AMD_IP_SDMA].num_queues ||
-       (!(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE) &&
+       (!polaris_buffers && !(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE) &&
         !pdev->drirc.performance.enable_transfer_queue))
       return false;
 

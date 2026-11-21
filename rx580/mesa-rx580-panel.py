@@ -21,14 +21,22 @@ STRIP = {
     "radv_rx580_pin_vram",
     "radv_rx580_pin_buffer_kb",
     "radv_rx580_large_heap_mb",
-    "radv_rx580_transfer_queue",
     "radv_rx580_float16",
 }
 
 OPTIONS = [
+    ("radv_rx580_dcc_with_fast_clear", "bool", True, None, None,
+     "DCC com fast clear de 256 a 512",
+     "Liga DCC só junto com fast clear e CLEAR_0000, na faixa que o Mesa deixa de fora. Não usa DCC expandido. Abaixo de 256 continua sem DCC."),
+    ("radv_rx580_transfer_queue", "bool", True, None, None,
+     "Fila SDMA só para buffers",
+     "Cópias de buffer podem ir para a SDMA. Cópias de imagem ficam fora dela, no caminho de compute ou gráficos."),
+    ("radv_rx580_prefer_vram", "bool", True, None, None,
+     "Preferir VRAM em cor e depth",
+     "Sobe um pouco a prioridade de attachment dedicado. O spill para GTT continua permitido. Não prende memória."),
     ("radv_rx580_htile_min", "int", 8, 8, 256,
      "HTILE em depth sem MSAA a partir de (px)",
-     "O driver não aceita menos que 8. Esse é o piso do Mesa. Subir desliga HTILE em depth pequeno."),
+     "O driver não aceita menos que 8. Depth em array não usa HTILE compatível com o sampler."),
     ("radv_rx580_inherited_conditional", "bool", True, None, None,
      "inheritedConditionalRendering",
      "Predicação herdada por command buffer secundário, em software."),
@@ -139,9 +147,8 @@ class Panel(Gtk.ApplicationWindow):
         intro = Gtk.Label(
             label="Ajustes do RADV para a RX 580 (Polaris 10). "
                   "Eles valem no próximo processo Vulkan. O painel grava ~/.drirc. "
-                  "DCC extra, fila SDMA, pin de VRAM e shaderFloat16 foram retirados: "
-                  "os três primeiros piscam ou oscilam o FPS, e o float16 aumenta VGPR "
-                  "conforme shaders novos entram na sessão. Aplicar apaga essas chaves antigas.",
+                  "DCC sem fast clear, pin de VRAM e shaderFloat16 continuam desligados: "
+                  "foram eles que piscaram a tela ou oscilaram o FPS. Aplicar apaga essas chaves antigas.",
             wrap=True,
             xalign=0,
         )

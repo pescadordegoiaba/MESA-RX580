@@ -25,11 +25,11 @@ Polaris 11 (RX 460/560), Polaris 12 (RX 540/550), Fiji, Tonga e outras GCN ficam
 
 ### DCC
 
-A faixa extra de DCC (alvos de cor entre 64×64 e 512×512, parte dela sem fast clear e inicializada como `DCC_UNCOMPRESSED`) foi desligada. No GFX8 o sampler lê `COMPRESSION_EN` e não aplica o código de fast clear. A metadata do color buffer e da textura saía de sincronia ao longo da sessão: a tela começava a piscar e o frametime oscilava. O DCC voltou à heurística do Mesa. Um `~/.drirc` antigo com `radv_rx580_dcc_*` não religa essa faixa.
+DCC extra só existe de 256×256 até 512×512, e só no mesmo caminho de um render target grande: fast clear ligado, metadata inicial `CLEAR_0000`, eliminate antes de amostrar. Abaixo de 256×256 não há DCC. O modo antigo, DCC sem fast clear e superfície `DCC_UNCOMPRESSED`, continua desligado. Foi ele que fez a tela piscar. As chaves velhas `radv_rx580_dcc_min`, `radv_rx580_dcc_fast_clear` e `radv_rx580_dcc_max` não religam esse modo.
 
 ### HTILE
 
-HTILE compatível com o texture cache em depth array foi desligado no GFX8. O clear trata cada layer como um bloco contíguo, e um slice intercalado corrompe o vizinho. O teste de alinhamento depois do cálculo da superfície não cobria todos os casos. O piso de HTILE em depth sem MSAA não desce de 8×8.
+Depth sem MSAA e sem array continua com HTILE a partir de 8×8. Array não ganha HTILE compatível com o sampler: no GFX8 o clear não endereça slice intercalado, e o teste de alinhamento deixou shadow map corrompido. O piso não desce de 8.
 
 ### shaderFloat16
 
@@ -37,15 +37,15 @@ Arquivos: `src/amd/vulkan/radv_physical_device.c`, `src/amd/vulkan/radv_shader.c
 
 A RX 580 converte FP16 (`v_cvt_f16_f32`, `v_cvt_f32_f16`) e faz load/store D16 unpacked. Não tem ALU packed de meia precisão. `v_add_f16` e `v_pk_*_f16` são GFX9+.
 
-`shaderFloat16` fica desligado na RX 580, e um `~/.drirc` antigo não religa. A placa não tem ALU packed de FP16. Anunciar a feature faz o jogo emitir shaders de 16 bits, o driver rebaixa a conta para FP32 e o uso de VGPR sobe. Numa sessão longa entram shaders novos, o scratch cresce e o tempo de quadro oscila. Quem quiser testar usa `radv_enable_float16_gfx8`. O rebaixamento só roda em shader que realmente tem float de 16 bits.
+`shaderFloat16` continua desligado na RX 580, e um `~/.drirc` antigo não religa. A placa não tem ALU packed de FP16. Anunciar a feature faz o jogo emitir shaders de 16 bits, o driver rebaixa a conta para FP32 e o uso de VGPR sobe. Numa sessão longa entram shaders novos, o scratch cresce e o tempo de quadro oscila. Quem quiser testar usa `radv_enable_float16_gfx8`. O rebaixamento só roda em shader que realmente tem float de 16 bits.
 
 `storageInputOutput16` não foi ligado. Varying packed de 16 bits pede a matemática que esta placa não tem.
 
 ### Fila de transferência e VRAM
 
-A fila SDMA não fica mais ligada por padrão na RX 580. A SDMA 3.x não lê DCC nem HTILE, e cópias assíncronas ao longo da sessão corrompiam superfície. `RADV_PERFTEST=transfer_queue` ou `radv_enable_transfer_queue` ainda ligam a fila para teste.
+A fila SDMA volta ligada, só para cópia de buffer. Cópia de imagem na RX 580 não entra na SDMA, comprimida ou não. Foi cópia de imagem nesse engine que corrompeu superfície.
 
-O pin de VRAM (`RADEON_FLAG_NO_GTT_SPILL`) e o aumento de prioridade também saíram. Com o conjunto de trabalho maior do que a VRAM, o kernel passava a brigar para manter esses BOs na placa e o frametime oscilava. A colocação voltou a ser a do Mesa.
+Attachment dedicado de cor e depth ganha prioridade 16, um pouco acima do padrão 14. O spill para GTT continua permitido. O pin que recusava spill e usava prioridade 26 continua desligado: com a VRAM cheia o kernel brigava com esses BOs e o FPS oscilava. Heap grande e buffer grande não mudam de prioridade, porque crescem durante a sessão.
 
 ## inheritedConditionalRendering
 
@@ -72,7 +72,7 @@ Formatos que o Mesa já emula no upstream permanecem como estão. Este fork não
 
 ## Limites conhecidos
 
-- DCC, HTILE de depth array, fila SDMA e pin de VRAM seguem o Mesa. As versões próprias deste fork faziam a tela piscar e o FPS oscilar depois de uma sessão longa.
+- DCC sem fast clear, HTILE de depth array, SDMA em imagem, pin de VRAM e shaderFloat16 continuam fora. Foram esses que piscaram a tela ou oscilaram o FPS.
 - `shaderFloat16` não dobra a taxa de ALU. O ganho está em carga, armazenagem e conversão de 16 bits.
 - Dois primaries executando ao mesmo tempo o mesmo secundário com predicados diferentes compartilham o slot de predicado desse secundário. Uso simultâneo com predicados distintos pode correr.
 
@@ -82,10 +82,13 @@ Formatos que o Mesa já emula no upstream permanecem como estão. Este fork não
 
 O que a janela ainda controla, só na Polaris 10:
 
+- DCC com fast clear entre 256 e 512;
+- fila SDMA só para buffers;
+- preferência leve de VRAM em cor e depth, com spill ligado;
 - piso do HTILE em depth sem MSAA, no mínimo 8;
 - `inheritedConditionalRendering`.
 
-Aplicar apaga do `~/.drirc` as chaves antigas de DCC extra, pin de VRAM, fila SDMA e `shaderFloat16`. O driver também ignora essas chaves se elas ainda estiverem no arquivo.
+Aplicar apaga do `~/.drirc` as chaves antigas de DCC sem fast clear, pin de VRAM e `shaderFloat16`. O driver ignora essas chaves se elas continuarem no arquivo.
 
 ## Instalar o driver e o painel
 

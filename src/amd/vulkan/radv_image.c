@@ -147,48 +147,34 @@ radv_rx580_color_target(const struct radv_physical_device *pdev, const struct ra
    return true;
 }
 
-static uint64_t
-radv_rx580_edge_pixels(int edge)
-{
-   if (edge <= 0)
-      return 0;
-   return (uint64_t)edge * (uint64_t)edge;
-}
-
 bool
 radv_polaris_extra_dcc(const struct radv_physical_device *pdev, const struct radv_image *image)
 {
-   /* Do not widen DCC on the RX 580. The extra band below the generic 512²
-    * cutoff initialized some targets as DCC_UNCOMPRESSED and skipped fast
-    * clear. On GFX8 the texture unit reads COMPRESSION_EN and does not
-    * apply the clear code itself, so CB and TC metadata drift. After a
-    * long session the color target flickers and the frametime jumps.
-    * drirc edges are ignored on purpose, including values already saved
-    * by the settings panel.
+   /* Reformulated DCC for the RX 580. The old band below 256² turned DCC on
+    * without fast clear and initialized it as DCC_UNCOMPRESSED. GFX8 samples
+    * that through COMPRESSION_EN and does not apply the clear code, so the
+    * metadata drifted and the target flickered.
+    *
+    * This path only fills the gap the generic 512² cutoff leaves, and only
+    * from 256² up. Fast clear stays enabled, so init uses CLEAR_0000 and the
+    * eliminate pass still runs before sampling. Below 256² there is no DCC.
     */
-   (void)pdev;
-   (void)image;
-   return false;
+   uint64_t pixels;
+
+   if (!pdev->drirc.performance.rx580_dcc_with_fast_clear)
+      return false;
+   if (!radv_rx580_color_target(pdev, image, &pixels))
+      return false;
+   return pixels >= 256ull * 256ull && pixels <= 512ull * 512ull;
 }
 
 bool
 radv_polaris_dcc_without_fast_clear(const struct radv_physical_device *pdev, const struct radv_image *image)
 {
-   /* radv_rx580_dcc_fast_clear is the edge where fast clear starts. Below it
-    * the eliminate pass costs more than the clear it saves, and CLEAR_0000
-    * is not sampled correctly unless that pass runs. 0 keeps the whole extra
-    * band expanded.
-    */
-   uint64_t pixels;
-   const int fast_clear_edge = pdev->drirc.performance.rx580_dcc_fast_clear;
-
-   if (!radv_polaris_extra_dcc(pdev, image))
-      return false;
-   if (fast_clear_edge <= 0)
-      return true;
-   if (!radv_rx580_color_target(pdev, image, &pixels))
-      return false;
-   return pixels < radv_rx580_edge_pixels(fast_clear_edge);
+   /* Never. DCC without fast clear is the path that flickered. */
+   (void)pdev;
+   (void)image;
+   return false;
 }
 
 static bool

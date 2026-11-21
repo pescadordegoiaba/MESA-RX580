@@ -174,11 +174,19 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
          flags |= RADEON_FLAG_GFX12_ALLOW_DCC;
       }
 
-      /* RX 580 VRAM pinning is intentionally not applied. Refusing GTT
-       * spill and raising eviction priority made the kernel thrash once
-       * the working set outgrew VRAM, which matches the frametime spikes
-       * after a long session. radv_rx580_pin_vram is ignored.
+      /* RX 580: dedicated color and depth get a small eviction bump so
+       * they are preferred in VRAM. GTT spill stays on. The old path refused
+       * spill and used priority 26, and the kernel thrashed once the working
+       * set outgrew VRAM. 16 is just above the default 0.5 priority (14).
+       * Large heaps and buffers are left alone: those grow during a session.
+       * radv_rx580_pin_vram is ignored.
        */
+      if (pdev->drirc.performance.rx580_prefer_vram && pdev->info.gfx_level == GFX8 &&
+          pdev->info.family == CHIP_POLARIS10 && domain == RADEON_DOMAIN_VRAM &&
+          (flags & RADEON_FLAG_NO_CPU_ACCESS) && !mem->vk.export_handle_types && mem->image &&
+          (mem->image->vk.usage & (VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR |
+                                   VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR)))
+         priority = MAX2(priority, 16u);
 
       if (device->overallocation_disallowed) {
          uint64_t total_size = pdev->memory_properties.memoryHeaps[heap_index].size;
